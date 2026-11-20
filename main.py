@@ -1,4 +1,3 @@
-
 import os
 import time
 import random
@@ -17,6 +16,9 @@ from langchain_google_genai import (
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+
+# [AGREGADO AUTÓMATA] Importamos la clase del archivo automata_favoritismo.py
+from automata_favoritismo import AutomataFavoritismo
 
 
 # ======================================================
@@ -284,6 +286,10 @@ Evita repetir información innecesariamente.
 Da respuestas breves pero útiles.
 No prometas resultados.
 
+8. PROTOCOLO DE AUTÓMATA (CUANDO ESTÉ ACTIVO):
+{estado_automata}
+Si el autómata está activo, guía tu respuesta cumpliendo el objetivo del nodo actual y presentando de forma conversacional las opciones de ese paso, apoyándote en el CONTEXTO RECUPERADO DE LOS PDF.
+
 HISTORIAL:
 {history}
 
@@ -336,10 +342,25 @@ def format_docs(documentos):
 
 
 # ======================================================
-# 7. MEMORIA DE CONVERSACIÓN
+# 7. MEMORIA DE CONVERSACIÓN Y AUTÓMATA
 # ======================================================
 
 historial = []
+
+# [AGREGADO AUTÓMATA] Instancia global del autómata y palabras disparadoras
+automata = AutomataFavoritismo()
+
+PALABRAS_FAVORITISMO = (
+    "favoritismo",
+    "preferencia",
+    "alumnas",
+    "puntos extra",
+    "segundas oportunidades",
+    "excluyen",
+    "comentarios degradantes",
+    "trato desigual",
+    "daño moral"
+)
 
 
 def formatear_historial():
@@ -362,9 +383,16 @@ def construir_busqueda(pregunta):
         anteriores[-3:]
     )
 
+    # [AGREGADO AUTÓMATA] Si el autómata está activo, enriquecemos la búsqueda en FAISS con la etapa actual
+    extra_automata = ""
+    if automata.activo:
+        etapa = automata.ESTADOS[automata.estado_actual]["etapa"]
+        extra_automata = f"Protocolo favoritismo etapa: {etapa}. Código Civil Jalisco 1391 1394 Bis queja pruebas."
+
     return (
         f"Conversación previa: {contexto_anterior}\n"
         f"Pregunta actual: {pregunta}\n"
+        f"{extra_automata}\n"
         "CUTonalá, orientación institucional, "
         "funciones, contactos, quejas, procedimientos."
     )[-1800:]
@@ -407,7 +435,7 @@ def consultar_faiss(pregunta):
 # 9. CONSULTAR GEMINI CON REINTENTOS
 # ======================================================
 
-def consultar_gemini(pregunta, documentos):
+def consultar_gemini(pregunta, documentos, instruccion_automata="Autómata inactivo. Responde en modo consulta general."):
 
     contexto = format_docs(documentos)
 
@@ -428,7 +456,8 @@ def consultar_gemini(pregunta, documentos):
             respuesta = cadena_respuesta.invoke({
                 "input": pregunta,
                 "history": formatear_historial(),
-                "context": contexto
+                "context": contexto,
+                "estado_automata": instruccion_automata
             })
 
             duracion = time.perf_counter() - inicio
@@ -509,9 +538,11 @@ while True:
     if pregunta.lower() == "reiniciar":
 
         historial.clear()
+        # [AGREGADO AUTÓMATA] También reiniciamos el autómata al limpiar la conversación
+        automata.reset()
 
         print(
-            "\nTutor: Conversación reiniciada. "
+            "\nTutor: Conversación y autómata reiniciados. "
             "¿En qué puedo ayudarte?"
         )
 
@@ -540,6 +571,22 @@ while True:
 
         continue
 
+    # [AGREGADO AUTÓMATA] Lógica de activación y transición de estados
+    if not automata.activo and any(p in pregunta.lower() for p in PALABRAS_FAVORITISMO):
+        automata.activo = True
+        print(f"\n[Autómata] Activado en: {automata.estado_actual}", flush=True)
+    elif automata.activo:
+        try:
+            regla = automata.clasificar_y_avanzar(llm, pregunta)
+            print(f"\n[Autómata] Regla detectada: {regla} -> Estado actual: {automata.estado_actual}", flush=True)
+        except Exception as e:
+            print(f"\n[Autómata] Aviso al clasificar: {e} (Se mantiene en {automata.estado_actual})", flush=True)
+
+    if automata.activo:
+        instruccion_automata = automata.obtener_prompt_estado()
+    else:
+        instruccion_automata = "Autómata inactivo. Responde normalmente siguiendo las reglas del sistema."
+
     print("\nConsultando documentos...")
 
     try:
@@ -552,7 +599,9 @@ while True:
 
     try:
         respuesta = consultar_gemini(
-            pregunta, documentos
+            pregunta,
+            documentos,
+            instruccion_automata
         )
 
     except Exception as error:
@@ -565,6 +614,11 @@ while True:
         continue
 
     print(f"\nTutor: {respuesta}")
+
+    # [AGREGADO AUTÓMATA] Si llegó al estado FIN, liberamos el autómata para siguientes preguntas
+    if automata.activo and automata.estado_actual == "FIN":
+        print("\n[Autómata] Protocolo de favoritismo completado. Volviendo a modo general.", flush=True)
+        automata.reset()
 
     historial.extend([
         ("Estudiante", pregunta),
